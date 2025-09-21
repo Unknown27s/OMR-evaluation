@@ -62,23 +62,30 @@ def load_key_from_excel_bytes(b: bytes) -> Dict[str, Any]:
     all_keys = {}
     for sheet in xls.sheet_names:
         df_raw = pd.read_excel(xls, sheet_name=sheet, header=None, engine="openpyxl")
-        # try detect ROI in first few rows
+        # Robust ROI extraction
         roi = None
-        for r in range(min(5, len(df_raw))):
-            row = df_raw.iloc[r].astype(str).str.lower().tolist()
-            joined = " ".join(row)
-            if "roi" in joined or "roi_y" in joined or "roi_x" in joined:
-                if r + 1 < len(df_raw):
-                    nxt = df_raw.iloc[r+1].tolist()
+        # 1. Check for columns named roi_y1, roi_y2, roi_x1, roi_x2
+        col_names = df_raw.iloc[0].astype(str).str.lower().tolist()
+        roi_cols = [i for i, name in enumerate(col_names) if name in ["roi_y1", "roi_y2", "roi_x1", "roi_x2"]]
+        if len(roi_cols) == 4:
+            try:
+                roi = [int(float(str(df_raw.iloc[1, idx]))) for idx in roi_cols]
+            except Exception:
+                roi = None
+        # 2. If not found, check for a row labeled 'roi' or similar
+        if roi is None:
+            for r in range(min(5, len(df_raw))):
+                row = df_raw.iloc[r].astype(str).str.lower().tolist()
+                if any("roi" in cell for cell in row):
                     nums = []
-                    for v in nxt:
+                    for v in row:
                         try:
                             nums.append(int(float(v)))
                         except Exception:
                             pass
                     if len(nums) >= 4:
                         roi = nums[:4]
-                break
+                        break
         # header detection
         header_row = None
         for r in range(min(5, len(df_raw))):
@@ -117,7 +124,7 @@ def load_key_from_excel_bytes(b: bytes) -> Dict[str, Any]:
             key["roi"] = roi
         all_keys[sheet] = key
     if len(all_keys) == 1:
-        return list(all_keys.values())[0]
+            return all_keys[sheet]
     return all_keys
 
 def load_answer_key_file(uploaded_file) -> Dict[str, Any]:
@@ -514,6 +521,7 @@ absolute_min = st.sidebar.number_input("Absolute min pixels threshold", value=30
 ambiguous_ratio = st.sidebar.slider("Ambiguity second-best / best ratio", 0.5, 0.95, 0.8)
 debug_images = st.sidebar.checkbox("Show debug (intermediate) images", value=False)
 num_workers = st.sidebar.slider("Parallel workers", 1, 8, 4)
+central_crop_ratio = st.sidebar.slider("Central crop ratio (fallback)", 0.2, 1.0, 0.6, step=0.05)
 
 key_struct = None
 set_choice = None
@@ -542,27 +550,33 @@ if st.button("Start grading"):
 
     # resolve key
     try:
-        if isinstance(key_struct, dict) and "answers" in key_struct:
+        if key_struct is not None and isinstance(key_struct, dict) and "answers" in key_struct:
             answer_key = key_struct
             used_set, used_subject = None, None
         else:
+            if key_struct is None:
+                st.error("Answer key not loaded.")
+                st.stop()
             if set_choice is None:
                 set_choice = list(key_struct.keys())[0]
-            branch = key_struct[set_choice]
+            branch = key_struct.get(set_choice)
+            if branch is None:
+                st.error("Invalid set selection.")
+                st.stop()
             if isinstance(branch, dict) and "answers" in branch:
                 answer_key = branch
                 used_set, used_subject = set_choice, None
             else:
                 if subject_choice is None:
                     subject_choice = list(branch.keys())[0]
-                answer_key = branch[subject_choice]
+                answer_key = branch.get(subject_choice)
                 used_set, used_subject = set_choice, subject_choice
     except Exception as e:
         st.error(f"Failed to resolve key: {e}")
         st.stop()
 
     # sanitize
-    if "answers" not in answer_key:
+    if answer_key is None or "answers" not in answer_key:
         st.error("Answer key missing 'answers' list")
         st.stop()
     answer_key["answers"] = [int(a) if a is not None else None for a in answer_key["answers"]]
@@ -580,7 +594,10 @@ if st.button("Start grading"):
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tpdf:
                     tpdf.write(up.read()); tpdf.flush(); tmp_pdf = tpdf.name
-                pages = convert_from_path(tmp_pdf, dpi=200, poppler_path=poppler_path.strip() or None)
+                if poppler_path and poppler_path.strip():
+                    pages = convert_from_path(tmp_pdf, dpi=200, poppler_path=poppler_path.strip())
+                else:
+                    pages = convert_from_path(tmp_pdf, dpi=200)
                 os.unlink(tmp_pdf)
                 for i, page in enumerate(pages):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmpimg:
@@ -610,6 +627,8 @@ if st.button("Start grading"):
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
                 raise RuntimeError("Unable to decode image")
+            if answer_key is None:
+                raise RuntimeError("Answer key is None. Cannot grade.")
             if mode == "adaptive_contour":
                 res, ann = grade_contour_mode(img, answer_key, absolute_min=absolute_min, ambiguous_ratio=ambiguous_ratio, debug=debug_images)
             elif mode == "roi_grid":
@@ -655,7 +674,9 @@ if st.button("Start grading"):
                 "correct_choice": f"{res.get('correct')}/{res.get('total_questions')}",
                 "status": f"{res.get('score_percent'):.2f}%"
             }
-            df.loc[len(df)] = summary_row
+            # Fix DataFrame assignment for summary row
+            summary_row_df = pd.DataFrame([summary_row])
+            df = pd.concat([df, summary_row_df], ignore_index=True)
             out_csv = os.path.join(out_dir, f"{basename}_results.csv")
             df.to_csv(out_csv, index=False)
             return {"base": basename, "img": out_img, "csv": out_csv, "score": res.get("score_percent"), "correct": res.get("correct"), "wrong": res.get("wrong"), "no_mark": res.get("no_mark"), "multiple": res.get("multiple")}
@@ -706,7 +727,7 @@ if st.button("Start grading"):
     st.write("## Annotated preview (first 10)")
     for r in results_summary[:10]:
         if "img" in r and os.path.exists(r["img"]):
-            st.image(r["img"], caption=f"{r['base']} — {r.get('score',0):.2f}%", use_column_width=False)
+            st.image(r["img"], caption=f"{r['base']} — {r.get('score',0):.2f}%", use_container_width=False)
             with open(r["img"], "rb") as f:
                 st.download_button(f"Download {os.path.basename(r['img'])}", f.read(), file_name=os.path.basename(r['img']))
 
