@@ -124,7 +124,7 @@ def load_key_from_excel_bytes(b: bytes) -> Dict[str, Any]:
             key["roi"] = roi
         all_keys[sheet] = key
     if len(all_keys) == 1:
-            return all_keys[sheet]
+        return list(all_keys.values())[0]
     return all_keys
 
 def load_answer_key_file(uploaded_file) -> Dict[str, Any]:
@@ -286,9 +286,11 @@ def grade_contour_mode(img_bgr: np.ndarray, answer_key: Dict[str,Any],
         # process each question row
         for q_idx, row_contours in enumerate(grouped):
             if len(row_contours) == 0:
+                correct_choice = answer_key["answers"][q_idx] if q_idx < len(answer_key["answers"]) else None
                 final_results.append({
                     "question": q_idx+1,
                     "detected": None,
+                    "correct_choice": correct_choice,
                     "counts": [],
                     "confidences": [],
                     "status": "no_bubbles_found"
@@ -310,17 +312,28 @@ def grade_contour_mode(img_bgr: np.ndarray, answer_key: Dict[str,Any],
             # compute detection
             counts_arr = np.array(counts)
             if counts_arr.size == 0:
+                correct_choice = answer_key["answers"][q_idx] if q_idx < len(answer_key["answers"]) else None
                 final_results.append({
                     "question": q_idx+1,
-                    "detected": None, "counts": [], "confidences": [], "status": "no_bubbles_found"
+                    "detected": None,
+                    "correct_choice": correct_choice,
+                    "counts": [],
+                    "confidences": [],
+                    "status": "no_bubbles_found"
                 })
                 continue
             max_val = int(np.max(counts_arr))
             if max_val < absolute_min:
                 # everything under threshold -> no_mark
+                correct_choice = answer_key["answers"][q_idx] if q_idx < len(answer_key["answers"]) else None
                 confidences = [round(float(c)/ (counts_arr.sum() + 1e-9) * 100, 2) for c in counts_arr]
                 final_results.append({
-                    "question": q_idx+1, "detected": None, "counts": counts, "confidences": confidences, "status": "no_mark"
+                    "question": q_idx+1,
+                    "detected": None,
+                    "correct_choice": correct_choice,
+                    "counts": counts,
+                    "confidences": confidences,
+                    "status": "no_mark"
                 })
                 continue
             # find candidates >= threshold (e.g., >= 50% of max)
@@ -328,8 +341,14 @@ def grade_contour_mode(img_bgr: np.ndarray, answer_key: Dict[str,Any],
             marked = [i for i, val in enumerate(counts_arr) if val >= threshold]
             confidences = [round(float(c)/ (counts_arr.sum() + 1e-9) * 100, 2) for c in counts_arr]
             if len(marked) == 0:
+                correct_choice = answer_key["answers"][q_idx] if q_idx < len(answer_key["answers"]) else None
                 final_results.append({
-                    "question": q_idx+1, "detected": None, "counts": counts, "confidences": confidences, "status": "no_mark"
+                    "question": q_idx+1,
+                    "detected": None,
+                    "correct_choice": correct_choice,
+                    "counts": counts,
+                    "confidences": confidences,
+                    "status": "no_mark"
                 })
                 continue
             if len(marked) == 1:
@@ -349,18 +368,29 @@ def grade_contour_mode(img_bgr: np.ndarray, answer_key: Dict[str,Any],
                     color = (0,255,0) if status.startswith("correct") else (0,0,255)
                     cv2.rectangle(annotated, (x,y), (x+w, y+h), color, 2)
                 final_results.append({
-                    "question": q_idx+1, "detected": detected, "counts": counts, "confidences": confidences, "status": status
+                    "question": q_idx+1,
+                    "detected": detected,
+                    "correct_choice": correct_choice,
+                    "counts": counts,
+                    "confidences": confidences,
+                    "status": status
                 })
             else:
                 # multiple marks
                 detected = marked
+                correct_choice = answer_key["answers"][q_idx] if q_idx < len(answer_key["answers"]) else None
                 # annotate all marked
                 for idx in detected:
                     if idx < len(boxes):
                         x,y,w,h = boxes[idx]
                         cv2.rectangle(annotated, (x,y), (x+w, y+h), (0,200,200), 2)
                 final_results.append({
-                    "question": q_idx+1, "detected": detected, "counts": counts, "confidences": confidences, "status": "multiple_marks"
+                    "question": q_idx+1,
+                    "detected": detected,
+                    "correct_choice": correct_choice,
+                    "counts": counts,
+                    "confidences": confidences,
+                    "status": "multiple_marks"
                 })
     else:
         # too sparse detection -> fallback to ROI/grid scanning (if ROI provided)
@@ -414,10 +444,22 @@ def grade_roi_grid(warped_color: np.ndarray, answer_key: Dict[str,Any], absolute
     h, w = warped_color.shape[:2]
     y1,y2 = max(0,y1), min(h,y2)
     x1,x2 = max(0,x1), min(w,x2)
+    
+    # Validate ROI bounds
+    if y1 >= y2 or x1 >= x2:
+        raise RuntimeError(f"Invalid ROI bounds: y[{y1}:{y2}], x[{x1}:{x2}]")
+    
     crop = warped_color[y1:y2, x1:x2]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     num_q = int(answer_key["num_questions"])
     num_choices = int(answer_key.get("num_choices",4))
+    
+    # Validate dimensions
+    if num_q <= 0:
+        raise RuntimeError(f"Invalid number of questions: {num_q}")
+    if num_choices <= 0:
+        raise RuntimeError(f"Invalid number of choices: {num_choices}")
+    
     ch, cw = gray.shape
     cell_h = ch // num_q
     cell_w = cw // num_choices
@@ -496,7 +538,6 @@ def grade_large_box_then_grid(warped_color, answer_key, absolute_min=30):
     # now grade block as if it's full sheet with ROI covering whole block
     # create synthetic key with roi covering full block and same numbers
     synthetic_key = answer_key.copy()
-    synthetic_key = synthetic_key.copy()
     synthetic_key['roi'] = [0, block.shape[0], 0, block.shape[1]]
     # call grade_roi_grid with block used as warped_color
     results_dict, full_ann = grade_roi_grid(block, synthetic_key, absolute_min=absolute_min)
