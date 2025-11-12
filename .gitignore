@@ -4,3 +4,15 @@
 /results
 /templates
 /uploads
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.DS_Store
+.vscode/
+.idea/
+node_modules/

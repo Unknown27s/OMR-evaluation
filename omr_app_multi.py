@@ -444,10 +444,22 @@ def grade_roi_grid(warped_color: np.ndarray, answer_key: Dict[str,Any], absolute
     h, w = warped_color.shape[:2]
     y1,y2 = max(0,y1), min(h,y2)
     x1,x2 = max(0,x1), min(w,x2)
+    
+    # Validate ROI bounds
+    if y1 >= y2 or x1 >= x2:
+        raise RuntimeError(f"Invalid ROI bounds: y[{y1}:{y2}], x[{x1}:{x2}]")
+    
     crop = warped_color[y1:y2, x1:x2]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     num_q = int(answer_key["num_questions"])
     num_choices = int(answer_key.get("num_choices",4))
+    
+    # Validate dimensions
+    if num_q <= 0:
+        raise RuntimeError(f"Invalid number of questions: {num_q}")
+    if num_choices <= 0:
+        raise RuntimeError(f"Invalid number of choices: {num_choices}")
+    
     ch, cw = gray.shape
     cell_h = ch // num_q
     cell_w = cw // num_choices
